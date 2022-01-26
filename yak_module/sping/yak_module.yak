@@ -1,0 +1,189 @@
+yakit.AutoInitYakit()
+// yakit.EnableTable("test", ["asd", "bcn", "qwe"])
+// data = make(map[string]var)
+// data["asd"] = "123"
+// data["bcn"] = "123"
+// data["qwe"] = "123"
+// yakit.Output(yakit.TableData("test", data))
+
+
+// 解析参数
+targets := cli.String("target", cli.setRequired(true))
+targetList := str.ParseStringToHosts(targets)
+
+// 字典转url query格式，带urlencode
+dict2UrlQueryWithUrlEncode := func(d) {
+    s := make([]string)
+    for k, v := range d {
+        s = append(s, sprintf("%v=%v", k, codec.EscapeQueryUrl(v)))
+    }
+    return str.Join(s, "&")
+}
+
+// 转为合法json，并反序列化
+convertLegalJson := func(s) {
+    // 去掉括号
+    s = str.ReplaceAll(s, "({", "{")
+    s = str.ReplaceAll(s, "})", "}")
+    
+    // 加引号，改单引号
+    s = str.ReplaceAll(s, `state:`, `"state":`)
+	s = str.ReplaceAll(s, `msg:`, `"msg":`)
+	s = str.ReplaceAll(s, `result:`, `"result":`)
+	s = str.ReplaceAll(s, `ip:`, `"ip":`)
+	s = str.ReplaceAll(s, `ipaddress:`, `"ipaddress":`)
+	s = str.ReplaceAll(s, `responsetime:`, `"responsetime":`)
+	s = str.ReplaceAll(s, `ttl:`, `"ttl":`)
+	s = str.ReplaceAll(s, `bytes:`, `"bytes":`)
+	s = str.ReplaceAll(s, `'`, `"`)
+
+    // 反序列化
+    d, err := json.New(s)
+    die(err)
+    return d.Value()
+}
+
+// 获取初始化配置
+getInitConfig := func() {
+    datas := dict2UrlQueryWithUrlEncode({
+        "host": "example.com",
+        "linetype": "电信,多线,联通,移动,其他",
+    })
+    // 请求接口获取配置
+    res, err := http.Request("POST", "https://ping.chinaz.com/", http.body(datas), http.header("Content-Type", "application/x-www-form-urlencoded"))
+    die(err)
+    resBody := string(http.GetAllBody(res))
+
+    // <div id="0e519c9d-dab8-480c-a372-c72480dd133a" class="row listw tc clearfix" linetype="1" state="0" trycount="0">
+            // <div class="col-2" name="city" serveruroup="0" data-company="[网锐]微端BGP200M/1200/月,www.wridc.com/hd.html">江苏宿迁[电信]</div>
+    // 获取监测点UUID
+    r1, _ := re.Compile(`<div id="([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})" class="row listw tc clearfix"[\s\S]+?<div class="col-2" name="city"[\s\S]+?>(\S+)</div>`)
+    result := r1.FindAllStringSubmatch(resBody, -1)
+    pingServerInfoList := make([]map[string]string)
+    for _, i := range result {
+        pingServerInfoList = append(pingServerInfoList, {
+            "name": i[2],
+            "guid": i[1],
+        })
+    }
+
+    // <input type="hidden" id="enkey" value="OT5JUx9bX5INGvYSBT087i8pZeO7y9et" />
+    // 获取enkey参数
+    r2, _ := re.Compile(`<input type="hidden" id="enkey" value="(\S+)" />`)
+    enkey := r2.FindStringSubmatch(resBody)
+    if len(enkey) == 0 {
+        die("get enkey failure")
+    }
+    enkey := enkey[1]
+
+    // <input type="hidden" id="checktype" value="0" />
+    // 获取checkType参数
+    r3, _ := re.Compile(`<input type="hidden" id="checktype" value="(\d+?)" />`)
+    checkType := r3.FindStringSubmatch(resBody)
+    if len(checkType) == 0 {
+        die("get checkType failure")
+    }
+    checkType := checkType[1]
+
+    return pingServerInfoList, enkey, checkType
+}
+
+// 让监测点开始ping操作
+ping := func(serverInfo, enkey, checkType, target, results) {
+    datas := dict2UrlQueryWithUrlEncode({
+        "guid": serverInfo["guid"],
+        "host": target,
+        "ishost": "0",
+        "isipv6": "0",
+        "encode": enkey,
+        "checktype": checkType,
+    })
+    res, err := http.Request("POST", "https://ping.chinaz.com/iframe.ashx?t=ping", http.body(datas), http.header("Content-Type", "application/x-www-form-urlencoded"), http.timeout(20))
+    // 请求失败也返回ping失败的结果
+    if err != nil {
+        results <- {"state": 0, "msg": ""}
+        return
+    }
+    resBody := string(http.GetAllBody(res))
+    // 失败 ({state:0,msg:''})
+    // 成功 ({state:1,msg:'',result:{ip:'110.242.68.4',ipaddress:'中国河北保定顺平县 联通',responsetime:'20毫秒',ttl:'52',bytes:'32'}})
+
+    // 处理结果
+    pingInfo := convertLegalJson(resBody)
+    pingInfo["cityname"] = serverInfo["name"]
+    if pingInfo["state"] == float64(1) {
+        if str.Contains(pingInfo["result"]["responsetime"], "超时") {
+            pingInfo["result"]["responsetime"] = "超时"
+        }
+        if str.Contains(pingInfo["result"]["ttl"], "超时") {
+            pingInfo["result"]["ttl"] = "超时"
+        }
+        if pingInfo["result"]["bytes"] == "" {
+            pingInfo["result"]["bytes"] = "-"
+        }
+        pingInfo["result"]["ipaddress"] = str.Join(str.Fields(pingInfo["result"]["ipaddress"]), " ")
+    }
+    results <- pingInfo
+}
+
+
+# ----------------------------------Main----------------------------------
+pingServerInfoList, enkey, checkType := getInitConfig()
+serverNum := len(pingServerInfoList)
+printf("初始化成功，共获取到%v个监测点\n", serverNum)
+
+for _, target := range targetList {
+    yakit.EnableTable(target, ["监测点", "响应IP", "IP归属地", "响应时间", "TTL", "数据包大小"])
+    results := make(chan var)
+
+    // https://www.yaklang.io/docs/newforyak/concurrent
+    submitTask := func(param...) {
+        go ping(param...)
+    }
+    for _, serverInfo := range pingServerInfoList {
+        submitTask(serverInfo, enkey, checkType, target, results)
+    }
+    // println(<- results)
+    success := 0
+	failure := 0
+    ips := make(map[string]int)
+    for i := 0; i < serverNum; i++ {
+        data := <- results
+        // dump(data)
+        if data["state"] == float64(1) {
+            if data["result"]["ip"] != "" {
+                success++
+                if ips[data["result"]["ip"]] == undefined {
+                    ips[data["result"]["ip"]] = 1
+                }else {
+                    ips[data["result"]["ip"]]++
+                }
+                // 成功的探测点输出表格
+                tableData := make(map[string]var)
+                tableData["监测点"] = data["cityname"]
+                tableData["响应IP"] = data["result"]["ip"]
+                tableData["IP归属地"] = data["result"]["ipaddress"]
+                tableData["响应时间"] = data["result"]["responsetime"]
+                tableData["TTL"] = data["result"]["ttl"]
+                tableData["数据包大小"] = data["result"]["bytes"]
+                yakit.Output(yakit.TableData(target, tableData))
+            }
+        }else {
+            failure++
+        }
+        yakit.StatusCard(sprintf("%v:成功数量", target), success, target)
+        yakit.StatusCard(sprintf("%v:失败数量", target), failure, target)
+        // printf("\r正在执行ping操作，当前：%v/%v个，成功：%v/%v个，失败：%v/%v个，总进度：%.2f%%", i+1, serverNum, success, serverNum, failure, serverNum, 100*(float64(i+1)/float64(serverNum)))
+    }
+    println()
+    if len(ips) > 1 {
+        yakit.StatusCard(sprintf("%v:是否存在CDN", target), "是", target)
+        // println("监测点返回不同IP，可能存在CDN")
+    }else {
+        for ip := range ips {
+            yakit.StatusCard(sprintf("%v:是否存在CDN", target), sprintf("否 IP为:%v", ip), target)
+            // printf("所有监测点返回IP一致，为%v\n", ip)
+        }
+    }
+    // break
+}
