@@ -1,1 +1,5 @@
-目前前端还有点小问题，先上线等前端师傅修一下～
+# [yak]多地区Ping检测判断CDN 's Document
+
+Author: 奶权
+
+'

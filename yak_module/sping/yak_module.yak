@@ -1,11 +1,4 @@
 yakit.AutoInitYakit()
-// yakit.EnableTable("test", ["asd", "bcn", "qwe"])
-// data = make(map[string]var)
-// data["asd"] = "123"
-// data["bcn"] = "123"
-// data["qwe"] = "123"
-// yakit.Output(yakit.TableData("test", data))
-
 
 // 解析参数
 targets := cli.String("target", cli.setRequired(true))
@@ -132,7 +125,7 @@ pingServerInfoList, enkey, checkType := getInitConfig()
 serverNum := len(pingServerInfoList)
 printf("初始化成功，共获取到%v个监测点\n", serverNum)
 
-for _, target := range targetList {
+for targetIndex, target := range targetList {
     yakit.EnableTable(target, ["监测点", "响应IP", "IP归属地", "响应时间", "TTL", "数据包大小"])
     results := make(chan var)
 
@@ -144,15 +137,20 @@ for _, target := range targetList {
         submitTask(serverInfo, enkey, checkType, target, results)
     }
     // println(<- results)
-    success := 0
-	failure := 0
     ips := make(map[string]int)
     for i := 0; i < serverNum; i++ {
         data := <- results
-        // dump(data)
+     // dump(data)
+
+        // 总进度条
+        // yakit.SetProgress(( float64(i+1)*(float64(targetIndex+1)/float64(len(targetList))) )/float64(serverNum))
+        yakit.SetProgress( float64(i+1)*float64(targetIndex+1) / (float64(len(targetList)) * float64(serverNum)) )
+        // 子任务进度条
+        yakit.SetProgressEx(target, float64(i+1)/float64(serverNum))
+
+        // 统计结果、处理表格输出
         if data["state"] == float64(1) {
             if data["result"]["ip"] != "" {
-                success++
                 if ips[data["result"]["ip"]] == undefined {
                     ips[data["result"]["ip"]] = 1
                 }else {
@@ -168,20 +166,18 @@ for _, target := range targetList {
                 tableData["数据包大小"] = data["result"]["bytes"]
                 yakit.Output(yakit.TableData(target, tableData))
             }
-        }else {
-            failure++
         }
-        yakit.StatusCard(sprintf("%v:成功数量", target), success, target)
-        yakit.StatusCard(sprintf("%v:失败数量", target), failure, target)
         // printf("\r正在执行ping操作，当前：%v/%v个，成功：%v/%v个，失败：%v/%v个，总进度：%.2f%%", i+1, serverNum, success, serverNum, failure, serverNum, 100*(float64(i+1)/float64(serverNum)))
     }
     println()
     if len(ips) > 1 {
-        yakit.StatusCard(sprintf("%v:是否存在CDN", target), "是", target)
+        yakit.StatusCard(sprintf("%v:IS CDN", target), "是", target)
+        yakit.StatusCard(sprintf("%v:IP Number", target), len(ips), target)
         // println("监测点返回不同IP，可能存在CDN")
     }else {
         for ip := range ips {
-            yakit.StatusCard(sprintf("%v:是否存在CDN", target), sprintf("否 IP为:%v", ip), target)
+            yakit.StatusCard(sprintf("%v:IS CDN", target), "否", target)
+            yakit.StatusCard(sprintf("%v:IP Address", target), ip, target)
             // printf("所有监测点返回IP一致，为%v\n", ip)
         }
     }
