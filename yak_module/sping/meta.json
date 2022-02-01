@@ -27,7 +27,7 @@
         }
     ],
     "document": "document.md",
-    "general_module_verbose": "CDN检测",
+    "general_module_verbose": "CDN判断",
     "general_module_key": "isCDN",
     "is_general_module": true
 }
