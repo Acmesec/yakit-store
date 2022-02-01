@@ -1,24 +1,33 @@
 {
-    "name": "多地区Ping检测判断CDN",
+    "name": "多地区Ping判断CDN",
     "tags": [
         ""
     ],
-    "help": "利用站长之家多地区Ping检测判断CDN",
+    "help": "利用站长之家接口对目标进行多地区ping，判断是否存在cdn",
     "author": "奶权",
     "module_file": "yak_module.yak",
     "params": [
         {
-            "name": "target",
-            "verbose": "域名",
-            "description": "",
+            "name": "targets",
+            "verbose": "目标",
+            "description": "需要监测的域名，多个域名之间用`,`分割",
             "type": "string",
             "default_value": "",
             "required": true,
             "group": ""
+        },
+        {
+            "name": "threadNum",
+            "verbose": "并发数量",
+            "description": "一次多少个监测点同时执行ping操作",
+            "type": "uint",
+            "default_value": "20",
+            "required": false,
+            "group": ""
         }
     ],
     "document": "document.md",
-    "general_module_verbose": "CDN判断",
-    "general_module_key": "isCDN",
-    "is_general_module": true
+    "general_module_verbose": "",
+    "general_module_key": "",
+    "is_general_module": false
 }

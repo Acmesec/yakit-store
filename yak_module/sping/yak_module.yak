@@ -1,8 +1,66 @@
 yakit.AutoInitYakit()
 
 // 解析参数
-targets := cli.String("target", cli.setRequired(true))
+targets := cli.String("targets", cli.setRequired(true))
 targetList := str.ParseStringToHosts(targets)
+threadNum := cli.Int("threadNum", cli.setDefault(20))
+
+// 打开mmdb
+path, _ := os.Executable()
+geoip, err := mmdb.Open(file.Join(path, "..", "..", "GeoIP2-City.mmdb"))
+die(err)
+
+// 获取ip对应的城市
+getIPCity := func(ip) {
+    // 数据库中查询，并处理成map[string]string
+    ipInfo := mmdb.QueryIPCity(geoip, ip)[0]
+    ipInfo = json.loads(json.dumps(ipInfo))
+
+    country := ipInfo.Country["Names"]["zh-CN"]
+    // 无省级单位时
+    if ipInfo.Subdivisions != nil {
+        subdivisions := ipInfo.Subdivisions[0]["Names"]["zh-CN"]
+    }else {
+        subdivisions := ""
+    }
+
+    // 美国、日本等ip没有城市名
+    if len(ipInfo.City["Names"]) > 0 {
+        city := ipInfo.City["Names"]["zh-CN"]
+    }else {
+        city := ""
+    }
+
+    // 拼接，去除多余空格
+    ipCity := sprintf("%v %v %v", country, subdivisions, city)
+    ipCity := str.Join(str.Fields(ipCity), " ")
+
+    return ipCity
+}
+
+// 将jsonp解析成json
+convertJsonp2Json := func(s) {
+    r1, _ := re.Compile(`.*?\(({.*?})\)`)
+    result := r1.FindStringSubmatch(s)
+    if len(result) == 0 {
+        die(s)
+    }
+    jsObject := result[1]
+    
+    kvRe, _ := re.Compile(`([a-zA-Z0-9_]*?)(:['\[{"\d+])`)
+    kv := kvRe.FindAllStringSubmatch(jsObject, -1)
+
+    for _, result := range kv {
+        // println(result[0])
+        jsObject = str.Replace(jsObject, result[0], sprintf(`'%v'%v`, result[1], result[2]), 1)
+    }
+    jsObject = str.ReplaceAll(jsObject, `'`, `"`)
+    d, err := json.New(jsObject)
+    if err != nil {
+        println(s)
+    }
+    return d.Value()
+}
 
 // 字典转url query格式，带urlencode
 dict2UrlQueryWithUrlEncode := func(d) {
@@ -13,152 +71,134 @@ dict2UrlQueryWithUrlEncode := func(d) {
     return str.Join(s, "&")
 }
 
-// 转为合法json，并反序列化
-convertLegalJson := func(s) {
-    // 去掉括号
-    s = str.ReplaceAll(s, "({", "{")
-    s = str.ReplaceAll(s, "})", "}")
-    
-    // 加引号，改单引号
-    s = str.ReplaceAll(s, `state:`, `"state":`)
-	s = str.ReplaceAll(s, `msg:`, `"msg":`)
-	s = str.ReplaceAll(s, `result:`, `"result":`)
-	s = str.ReplaceAll(s, `ip:`, `"ip":`)
-	s = str.ReplaceAll(s, `ipaddress:`, `"ipaddress":`)
-	s = str.ReplaceAll(s, `responsetime:`, `"responsetime":`)
-	s = str.ReplaceAll(s, `ttl:`, `"ttl":`)
-	s = str.ReplaceAll(s, `bytes:`, `"bytes":`)
-	s = str.ReplaceAll(s, `'`, `"`)
-
-    // 反序列化
-    d, err := json.New(s)
-    die(err)
-    return d.Value()
-}
-
-// 获取初始化配置
+// 获取guid enkey等信息
 getInitConfig := func() {
     datas := dict2UrlQueryWithUrlEncode({
         "host": "example.com",
         "linetype": "电信,多线,联通,移动,其他",
     })
     // 请求接口获取配置
-    res, err := http.Request("POST", "https://ping.chinaz.com/", http.body(datas), http.header("Content-Type", "application/x-www-form-urlencoded"))
+    res, err := http.Request("POST", "http://mping.chinaz.com/?host=example.com", http.body(datas), http.header("Content-Type", "application/x-www-form-urlencoded"))
     die(err)
+
+    // 解析html dom
     resBody := string(http.GetAllBody(res))
+    dom, err := xpath.LoadHTMLDocument(resBody)
+    die(err)
 
-    // <div id="0e519c9d-dab8-480c-a372-c72480dd133a" class="row listw tc clearfix" linetype="1" state="0" trycount="0">
-            // <div class="col-2" name="city" serveruroup="0" data-company="[网锐]微端BGP200M/1200/月,www.wridc.com/hd.html">江苏宿迁[电信]</div>
-    // 获取监测点UUID
-    r1, _ := re.Compile(`<div id="([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})" class="row listw tc clearfix"[\s\S]+?<div class="col-2" name="city"[\s\S]+?>(\S+)</div>`)
-    result := r1.FindAllStringSubmatch(resBody, -1)
-    pingServerInfoList := make([]map[string]string)
-    for _, i := range result {
-        pingServerInfoList = append(pingServerInfoList, {
-            "name": i[2],
-            "guid": i[1],
-        })
+    // 获取到guid以及监测点名字
+    servers, _ := xpath.QueryAll(dom, `//*[@class="listw"]`)
+    if len(servers) == 0 {
+        die("get guid failure")
     }
-
-    // <input type="hidden" id="enkey" value="OT5JUx9bX5INGvYSBT087i8pZeO7y9et" />
+    pingServerInfoList := make([]map[string]string)
+    for _, server := range servers {
+        // 监测点名字
+        city, _ := xpath.Query(server, `//*[@name="city"]`)
+        name := xpath.OutputHTML(city)
+        // 监测点guid
+        guid := xpath.SelectAttr(server, "id")
+        pingServerInfoList = append(pingServerInfoList, {
+            "name": name,
+            "guid": guid,
+        })
+        // println(pingServerInfoList)
+    }
+    
     // 获取enkey参数
-    r2, _ := re.Compile(`<input type="hidden" id="enkey" value="(\S+)" />`)
-    enkey := r2.FindStringSubmatch(resBody)
-    if len(enkey) == 0 {
+    enkeyInput, _ := xpath.Query(dom, `//*[@id="enkey"]`)
+    if len(servers) == 0 {
         die("get enkey failure")
     }
-    enkey := enkey[1]
+    enkey := xpath.SelectAttr(enkeyInput, "value")
+    
+    return pingServerInfoList, enkey
+}
 
-    // <input type="hidden" id="checktype" value="0" />
-    // 获取checkType参数
-    r3, _ := re.Compile(`<input type="hidden" id="checktype" value="(\d+?)" />`)
-    checkType := r3.FindStringSubmatch(resBody)
-    if len(checkType) == 0 {
-        die("get checkType failure")
+// 获取域名的cdn提供商
+getTargetCDNType := func(target, enkey) {
+    // https://ping.chinaz.com/ajaxseo.aspx?t=cdn&host=www.baidu.com&enkey=YSFGg|EDs09FR4sfKk2y6L22aoCStB9D
+    res, err := http.Request("GET", sprintf(`https://ping.chinaz.com/ajaxseo.aspx?t=cdn&host=%v&enkey=%v`, target, enkey), http.header("Referer", "http://mping.chinaz.com/"), http.timeout(5))
+    if err != nil {
+        return "获取超时"
     }
-    checkType := checkType[1]
+    resBody := string(http.GetAllBody(res))
 
-    return pingServerInfoList, enkey, checkType
+    jsonStyleRes := convertJsonp2Json(resBody)
+    // println(jsonStyleRes)
+    if jsonStyleRes["result"] == undefined {
+        return "未知"
+    }
+    return jsonStyleRes["result"][0]["type"]
 }
 
 // 让监测点开始ping操作
-ping := func(serverInfo, enkey, checkType, target, results) {
+ping := func(sizedWg, serverInfo, enkey, target, results) {
+    defer sizedWg.Done()
     datas := dict2UrlQueryWithUrlEncode({
         "guid": serverInfo["guid"],
         "host": target,
-        "ishost": "0",
-        "isipv6": "0",
         "encode": enkey,
-        "checktype": checkType,
+        "ishost": "0",
+        "checktype": "0",
     })
-    res, err := http.Request("POST", "https://ping.chinaz.com/iframe.ashx?t=ping", http.body(datas), http.header("Content-Type", "application/x-www-form-urlencoded"), http.timeout(20))
-    // 请求失败也返回ping失败的结果
-    if err != nil {
-        results <- {"state": 0, "msg": ""}
-        return
-    }
+    res, err := http.Request("POST", "http://mping.chinaz.com/Handle/AjaxHandler.ashx?action=Ping", http.body(datas), http.header("Content-Type", "application/x-www-form-urlencoded"))
+    die(err)
     resBody := string(http.GetAllBody(res))
-    // 失败 ({state:0,msg:''})
-    // 成功 ({state:1,msg:'',result:{ip:'110.242.68.4',ipaddress:'中国河北保定顺平县 联通',responsetime:'20毫秒',ttl:'52',bytes:'32'}})
 
-    // 处理结果
-    pingInfo := convertLegalJson(resBody)
-    pingInfo["cityname"] = serverInfo["name"]
-    if pingInfo["state"] == float64(1) {
-        if str.Contains(pingInfo["result"]["responsetime"], "超时") {
-            pingInfo["result"]["responsetime"] = "超时"
-        }
-        if str.Contains(pingInfo["result"]["ttl"], "超时") {
-            pingInfo["result"]["ttl"] = "超时"
-        }
-        if pingInfo["result"]["bytes"] == "" {
-            pingInfo["result"]["bytes"] = "-"
-        }
-        pingInfo["result"]["ipaddress"] = str.Join(str.Fields(pingInfo["result"]["ipaddress"]), " ")
-    }
-    results <- pingInfo
+    jsonStyleRes := convertJsonp2Json(resBody)
+    jsonStyleRes["name"] = serverInfo["name"]
+    results <- jsonStyleRes
+    // println(jsonStyleRes)
 }
 
-
 # ----------------------------------Main----------------------------------
-pingServerInfoList, enkey, checkType := getInitConfig()
+
+pingServerInfoList, enkey := getInitConfig()
 serverNum := len(pingServerInfoList)
-printf("初始化成功，共获取到%v个监测点\n", serverNum)
+yakit.Info(sprintf("初始化成功，共获取到%v个监测点\n", serverNum))
 
 for targetIndex, target := range targetList {
-    yakit.EnableTable(target, ["监测点", "响应IP", "IP归属地", "响应时间", "TTL", "数据包大小"])
+    cdnType := getTargetCDNType(target, enkey)
+    yakit.StatusCard(sprintf("%v:CDN厂商", targetIndex+1), cdnType, target)
+    // printf("CDN厂商: %v(%v)\n", target, cdnType)
+
+    // 收集结果
     results := make(chan var)
+    go func(){
+        yakit.EnableTable(target, ["监测点", "响应IP", "IP归属地", "响应时间", "TTL", "数据包大小"])
+        ips := make(map[string]int)
+        for i := 0; i < serverNum; i++ {
+            data := <- results
 
-    // https://www.yaklang.io/docs/newforyak/concurrent
-    submitTask := func(param...) {
-        go ping(param...)
-    }
-    for _, serverInfo := range pingServerInfoList {
-        submitTask(serverInfo, enkey, checkType, target, results)
-    }
-    // println(<- results)
-    ips := make(map[string]int)
-    for i := 0; i < serverNum; i++ {
-        data := <- results
-     // dump(data)
+            // 总进度条
+            yakit.SetProgress( float64(i+1)*float64(targetIndex+1) / (float64(len(targetList)) * float64(serverNum)) )
+            // 子任务进度条
+            yakit.SetProgressEx(target, float64(i+1)/float64(serverNum))
 
-        // 总进度条
-        // yakit.SetProgress(( float64(i+1)*(float64(targetIndex+1)/float64(len(targetList))) )/float64(serverNum))
-        yakit.SetProgress( float64(i+1)*float64(targetIndex+1) / (float64(len(targetList)) * float64(serverNum)) )
-        // 子任务进度条
-        yakit.SetProgressEx(target, float64(i+1)/float64(serverNum))
-
-        // 统计结果、处理表格输出
-        if data["state"] == float64(1) {
-            if data["result"]["ip"] != "" {
-                if ips[data["result"]["ip"]] == undefined {
-                    ips[data["result"]["ip"]] = 1
-                }else {
-                    ips[data["result"]["ip"]]++
+            // 处理数据
+            if data["state"] == float64(1) {
+                if data["result"]["ip"] != "" {
+                    ipCity := getIPCity(data["result"]["ip"])
+                    data["result"]["ipaddress"] = ipCity
+                    if ips[data["result"]["ip"]] == undefined {
+                        ips[data["result"]["ip"]] = 1
+                    }else {
+                        ips[data["result"]["ip"]]++
+                    }
+                    if str.Contains(data["result"]["responsetime"], "超时") {
+                        data["result"]["responsetime"] = "超时"
+                    }
+                    if str.Contains(data["result"]["ttl"], "超时") {
+                        data["result"]["ttl"] = "超时"
+                    }
+                    if data["result"]["bytes"] == "" {
+                        data["result"]["bytes"] = "-"
+                    }
                 }
                 // 成功的探测点输出表格
                 tableData := make(map[string]var)
-                tableData["监测点"] = data["cityname"]
+                tableData["监测点"] = data["name"]
                 tableData["响应IP"] = data["result"]["ip"]
                 tableData["IP归属地"] = data["result"]["ipaddress"]
                 tableData["响应时间"] = data["result"]["responsetime"]
@@ -166,20 +206,34 @@ for targetIndex, target := range targetList {
                 tableData["数据包大小"] = data["result"]["bytes"]
                 yakit.Output(yakit.TableData(target, tableData))
             }
+            // printf("\r正在执行ping操作，当前：%v/%v个，总进度：%.2f%%", i+1, serverNum, 100*(float64(i+1)/float64(serverNum)))
         }
-        // printf("\r正在执行ping操作，当前：%v/%v个，成功：%v/%v个，失败：%v/%v个，总进度：%.2f%%", i+1, serverNum, success, serverNum, failure, serverNum, 100*(float64(i+1)/float64(serverNum)))
+    }()
+
+    // 开启任务
+    sizedWg := sync.NewSizedWaitGroup(threadNum)
+    submitTask := func(param...) {
+        sizedWg.Add()
+        go ping(sizedWg, param...)
     }
-    println()
+    for _, serverInfo := range pingServerInfoList {
+        submitTask(serverInfo, enkey, target, results)
+        // break
+    }
+    sizedWg.Wait()
+
+    // 等待收集结果的goroutine工作完毕
+    sleep(0.5)
+
+    // 判断是否CDN
+    // println()
     if len(ips) > 1 {
-        yakit.StatusCard(sprintf("%v:IS CDN", target), "是", target)
-        yakit.StatusCard(sprintf("%v:IP Number", target), len(ips), target)
-        // println("监测点返回不同IP，可能存在CDN")
+        yakit.StatusCard(sprintf("%v:是否存在CDN", targetIndex+1), "是", target)
+        yakit.StatusCard(sprintf("%v:返回IP数量", targetIndex+1), len(ips), target)
     }else {
+        yakit.StatusCard(sprintf("%v:是否存在CDN", targetIndex+1), "否", target)
         for ip := range ips {
-            yakit.StatusCard(sprintf("%v:IS CDN", target), "否", target)
-            yakit.StatusCard(sprintf("%v:IP Address", target), ip, target)
-            // printf("所有监测点返回IP一致，为%v\n", ip)
+            yakit.StatusCard(sprintf("%v:返回IP", targetIndex+1), ip, target)
         }
     }
-    // break
 }
